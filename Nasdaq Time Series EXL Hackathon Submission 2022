@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Nov 15 17:37:02 2022
+
+@author: john_rabovich
+"""
+
+import os
+import pandas as pd
+import numpy as np
+from bs4 import BeautifulSoup as Soup
+
+import yfinance as yf
+from yahoo_fin.stock_info import get_data
+import yahoo_fin.stock_info as si
+import ta
+from ta import add_all_ta_features
+from ta.momentum import RSIIndicator
+from ta.trend import macd 
+
+import datetime
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import confusion_matrix, classification_report
+from sklearn import metrics
+import xgboost as xg
+from sklearn.metrics import mean_squared_error as mse
+
+import sqlite3 
+from os import path
+from pathlib import Path 
+
+
+
+
+num_days = 10000
+interval = '1d'
+symbol = 'NDX'
+
+start = (datetime.date.today() - datetime.timedelta(num_days))
+end = datetime.datetime.today()
+
+nasdaq100_data = get_data(symbol,start_date =start,end_date = end)
+
+nasdaq100_data['close'].plot()
+nasdaq100_data[-250:]['close'].plot()
+"""
+11/15/22 de trended data is done by normalizing it
+
+originally did the trending with wind0ow size = 12 but realized this is incorrect bc my trend is about 250 days
+nasdaq100_data['z_close'] = (nasdaq100_data['close'] - nasdaq100_data['close'].rolling(window=12).mean()) / nasdaq100_data['close'].rolling(window=12).std()
+nasdaq100_data['close'].rolling(window=12).mean().plot()
+nasdaq100_data['z_close'].rolling(window=12).mean().plot()
+
+"""
+
+nasdaq100_data['z_close'] = (nasdaq100_data['close'] - nasdaq100_data['close'].rolling(window=250).mean()) / nasdaq100_data['close'].rolling(window=250).std()
+nasdaq100_data['z_closev_2'] = (nasdaq100_data['close'] - nasdaq100_data['close'].rolling(window=250).mean()) 
+
+
+nasdaq100_data['close'].rolling(window=250).mean().plot()
+nasdaq100_data['z_close'].rolling(window=250).mean().plot()
+
+nasdaq100_data ['z_close_shift'] = nasdaq100_data ['z_close'] - nasdaq100_data ['z_close'].shift(250)
+nasdaq100_data['z_close_shift'].plot()
+
+"""
+11/15/22 past year of data  is not stationary. clear downward trend. was able to the trend by making z data. now going to try ad fuller test below
+
+"""
+nasdaq100_data.dropna(inplace = True)
+
+from statsmodels.tsa.stattools import adfuller 
+print(" Is data stationary")
+df_stnry_test = adfuller(nasdaq100_data['close'], autolag = "AIC")
+print("Test Statistic {:.3f}".format(df_stnry_test[0]))
+print("P-value {:3f}".format(df_stnry_test[1]))
+
+
+print(" Is de trended data stationary")
+df_stnry_test = adfuller(nasdaq100_data['z_close'], autolag = "AIC")
+print("Test Statistic {:.3f}".format(df_stnry_test[0]))
+print("P-value {:3f}".format(df_stnry_test[1]))
+
+print(" Is shifted  data stationary")
+df_stnry_test = adfuller(nasdaq100_data['z_close_shift'], autolag = "AIC")
+print("Test Statistic {:.3f}".format(df_stnry_test[0]))
+print("P-value {:3f}".format(df_stnry_test[1]))
+
+"""
+11/16/22 testing ACF and PACF (autocorrelation and partial auto correlation)
+"""
+
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+
+fig, ax = plt.subplots(2,figsize =(12,6))
+ax[0] = plot_acf(nasdaq100_data['z_close'].dropna(),lags = 250)
+ax[1] = plot_pacf(nasdaq100_data['z_close'].dropna(),lags = 250)
+
+"""
+when choosing lag, neeed to choose a number for the lag k where k <= T/k and T = 6394 toal observations so max value of k = 80
+
+"""
+
+shift_1 = nasdaq100_data['z_close'].autocorr(lag = 80)
+plot_acf(nasdaq100_data['z_close'],lags = 80)
+plt.show()
+
+"""
+11/16/22
+doing time seiers autocorrelation analsis on last 250 days of data.
+Cutting down dataset didnt seemt to do much for me
+
+
+nasdaq100_l250 = nasdaq100_data[-250:]
+
+fig, ax = plt.subplots(2,figsize =(12,6))
+ax[0] = plot_acf(nasdaq100_l250['z_close'].dropna(),lags = 16)
+ax[1] = plot_pacf(nasdaq100_l250['z_close'].dropna(),lags = 16)
+
+shift_1 = nasdaq100_l250['z_close'].autocorr(lag = 16)
+plot_acf(nasdaq100_l250['z_close'],lags = 16)
+plt.show()
+
+"""
+
+nasdaq100_data['time_step'] = range(0,len(nasdaq100_data.index))
+nasdaq100_data.plot(kind = 'line', x = 'time_step', y = 'z_close')
+plt.show()
+
+nasdaq100_l250 = nasdaq100_data[-250:]
+nasdaq100_l250['time_step'] = range(0,len(nasdaq100_l250.index))
+nasdaq100_l250.plot(kind = 'line', x = 'time_step', y = 'z_close')
+plt.show()
+
+plot_acf(nasdaq100_l250['z_close'], lags = 16)
+
+
+nasdaq100_data['time_step'] = range(0,len(nasdaq100_data.index))
+nasdaq100_data.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+
+nasdaq100_4yrs = nasdaq100_data[-1000:]
+nasdaq100_4yr = nasdaq100_data[-1000:-751]
+nasdaq100_3yr = nasdaq100_data[-750:-501]
+nasdaq100_2yr = nasdaq100_data[-500:-251]
+nasdaq100_1yr = nasdaq100_data[-250:]
+"""
+11/16/2022 when i compared the past 4 years plots, yers 4 through 2 had definite seasonality trend and then year 1(current yeart) had nothing like
+that trend whatsover
+
+"""
+nasdaq100_4yrs['time_step'] = range(0,len(nasdaq100_4yrs.index))
+nasdaq100_4yrs.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+
+nasdaq100_4yr['time_step'] = range(0,len(nasdaq100_4yr.index))
+nasdaq100_4yr.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+nasdaq100_3yr['time_step'] = range(0,len(nasdaq100_3yr.index))
+nasdaq100_3yr.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+nasdaq100_2yr['time_step'] = range(0,len(nasdaq100_2yr.index))
+nasdaq100_2yr.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+nasdaq100_1yr['time_step'] = range(0,len(nasdaq100_1yr.index))
+nasdaq100_1yr.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+plot_acf(nasdaq100_l250['z_close'], lags = 16)
+plot_pacf(nasdaq100_l250['z_close'], lags = 16)
+
+"""
+11/18/2022 ARIMA forecasting and analysis
+According to ACF plot there is high correlation of values at time t and lags of itself. Will need to do something(exp smoothing most likely)
+The PACF seems pretty good for the most part
+Trying some exponential smoothing and then seeing what my data looks like. 
+Think about maytbe doing Holt or damp Holt exp smoothing some other time
+"""
+
+def exponential_smooth(data,alpha):
+    """
+    fucntion that exp smooths dataset so values are less "rigid"-quoting lucas rea
+    alpha : goign to weigh recent values more 
+    """
+    return data.ewm(alpha=alpha).mean()
+
+nasdaq100_data_exp_sm = exponential_smooth(nasdaq100_data,0.7)
+
+nasdaq100_4yrs_exp = nasdaq100_data_exp_sm[-1000:]
+nasdaq100_4yr_exp = nasdaq100_data_exp_sm[-1000:-751]
+nasdaq100_3yr_exp = nasdaq100_data_exp_sm[-750:-501]
+nasdaq100_2yr_exp = nasdaq100_data_exp_sm[-500:-251]
+nasdaq100_1yr_exp = nasdaq100_data_exp_sm[-250:]
+
+
+nasdaq100_4yrs_exp['time_step'] = range(0,len(nasdaq100_4yrs_exp.index))
+nasdaq100_4yrs_exp.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+nasdaq100_4yr_exp['time_step'] = range(0,len(nasdaq100_4yr_exp.index))
+nasdaq100_4yr_exp.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+nasdaq100_3yr_exp['time_step'] = range(0,len(nasdaq100_3yr_exp.index))
+nasdaq100_3yr_exp.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+nasdaq100_2yr_exp['time_step'] = range(0,len(nasdaq100_2yr_exp.index))
+nasdaq100_2yr_exp.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+nasdaq100_1yr_exp['time_step'] = range(0,len(nasdaq100_1yr_exp.index))
+nasdaq100_1yr_exp.plot(kind = 'line', x = 'time_step', y = 'close')
+plt.show()
+
+plot_acf(nasdaq100_1yr_exp['z_close'], lags = 16, title = "Last year Autocorrealtion")
+plot_pacf(nasdaq100_1yr_exp['z_close'], lags = 16, title = "Last year partial acf")
+
+"""
+going to plot raw data vs logged data. seems like i need a higher level of idfferencing due to the high autocorrelation values
+
+11/19/22 at some point may want to think about going back and doing holt winters smoothing instead of simple exp smoothing
+Also realized that for purposes of analysis and choosing best model its prob best ot go back to using close instead of z_close
+
+"""
+
+fig, ax = plt.subplots(2,figsize =(12,6))
+ax[0].plot(nasdaq100_data['close'].values)
+ax[0].set_title("RAw data")
+ax[1].plot(np.log(nasdaq100_data['close'].values))
+ax[1].set_title("Logged data (defalted )")
+
+
+fig,ax = plt.subplots(2,2, figsize = (12,6))
+first_diff = (np.log(nasdaq100_data['close']) - np.log(nasdaq100_data['close']).shift()).dropna()
+ax[0,0] = plot_acf(np.log(nasdaq100_data['close']),ax = ax[0,0], lags = 79, title = "ACF logged data")
+ax[1,0] = plot_pacf(np.log(nasdaq100_data['close']), ax = ax[1,0], lags = 79, title = "PACF logged data")
+ax[0,1] = plot_acf(first_diff,ax = ax[0,1], lags = 79, title = "ACF Differenced logged data")
+ax[1,1] = plot_pacf(first_diff, ax = ax[1,1], lags = 79, title = "PACF differenced logged data")
+
+from statsmodels.tsa.stattools import kpss 
+print(" Is data stationary?")
+stnry_test = kpss(np.log(nasdaq100_data['close'].dropna()),regression = 'ct')
+print("Test Statistic = {:.3f}".format(stnry_test[0]))
+print("P-value = {:.3f}".format(stnry_test[1]))
+print("Critical Values")
+for k,v in stnry_test[3].items():
+    print("\t{}: {}".format(k,v))
+    
+"""
+11/19/22 from kpss test on target var close, we ahve to reject null hypothesis that data is stationary. p value of .01 < .05 and test statistics
+3.064 > .146. However, i am going to move on and pretend the  data is weakly stationary  bc thats waht the guy im following on medium is donig
+
+ACF/PACF graph analysis-per rule 1 of differenceing, the top left graph indicates non stationarity. we see by first order of differencing in top right graph
+that the t -1 autocorrealtion is small/negative and > -0.5  and the lagged autocorrelations are patternless so we dont need more differencing.
+Going to start by comparing an ARIMA(0,0,0) model vs ARIMA(O,1,0)
+
+"""    
+from statsmodels.tsa.arima_model import ARIMA 
+
+model = ARIMA(np.log(nasdaq100_data['close']).dropna(),(0,0,0))
+res_000 = model.fit()
+print(res_000.summary())
+
+model = ARIMA(np.log(nasdaq100_data['close']).dropna(),(0,1,0))
+res_010 = model.fit()
+print(res_010.summary())
+
+
+fig, ax = plt.subplots(1, 2, sharey=True, figsize=(12, 6))
+ax[0].plot(res_000.resid.values, alpha=0.7, label='variance={:.3f}'.format(np.std(res_000.resid.values)))
+ax[0].hlines(0, xmin=0, xmax=350, color='r')
+ax[0].set_title("ARIMA(0,0,0)")
+ax[0].legend()
+ax[1].plot(res_010.resid.values, alpha=0.7, label='variance={:.3f}'.format(np.std(res_010.resid.values)))
+ax[1].hlines(0, xmin=0, xmax=350, color='r')
+ax[1].set_title("ARIMA(0,1,0)")
+ax[1].legend()
+
+"""
+11/19/22 ANALYSIS OF ARIMA(0,0,0) VS ARIMA(0,1,0)
+AIC is lower for ARIMA(0,1,0) which means its a better model and has lower variance. Now we move on to determing which order we use for the MA
+component
+"""
+
+model = ARIMA(np.log(nasdaq100_data['close']).dropna(),(0,1,0))
+res_010 = model.fit()
+print(res_010.summary())
+
+model = ARIMA(np.log(nasdaq100_data['close']).dropna(),(1,1,0))
+res_110 = model.fit()
+print(res_110.summary())
+
+
+fig, ax = plt.subplots(1, 2, sharey=True, figsize=(12, 6))
+ax[0].plot(res_010.resid.values, alpha=0.7, label='variance={:.3f}'.format(np.std(res_010.resid.values)))
+ax[0].hlines(0, xmin=0, xmax=350, color='r')
+ax[0].set_title("ARIMA(0,1,0)")
+ax[0].legend()
+ax[1].plot(res_110.resid.values, alpha=0.7, label='variance={:.3f}'.format(np.std(res_110.resid.values)))
+ax[1].hlines(0, xmin=0, xmax=350, color='r')
+ax[1].set_title("ARIMA(1,1,0)")
+ax[1].legend()
+
+
+
+model = ARIMA(np.log(nasdaq100_data['close']).dropna(),(0,1,0))
+res_010 = model.fit()
+print(res_010.summary())
+
+model = ARIMA(np.log(nasdaq100_data['close']).dropna(),(1,1,0))
+res_110 = model.fit()
+print(res_110.summary())
+
+model = ARIMA(np.log(nasdaq100_data['close']).dropna(),(0,1,1))
+res_011 = model.fit()
+print(res_011.summary())
+
+model = ARIMA(np.log(nasdaq100_data['close']).dropna(),(1,1,1))
+res_111 = model.fit()
+print(res_111.summary())
+
+
+plot_acf(res_111.resid.values, title = "ARIMA(1,1,1) RESIDUALS ACF")
+plot_pacf(res_111.resid.values, title = "ARIMA(1,1,1) RESIDUALS PACF")
+
+"""
+11/19/22 going to finally make ARIMA 1,1,1 model and only train on most recent 5 days of data
+11/19/22 cartier etienne data science method got too hard so i found something that at least makes predicitons
+
+"""
+from sklearn.metrics import mean_squared_error
+from math import sqrt
+# walk-forward validation
+train, test = np.log(nasdaq100_data_exp_sm['close'])[:-5], np.log(nasdaq100_data_exp_sm['close'])[-5:]
+history = [x for x in train]
+predictions = list()
+
+for t in range(len(test)):
+    model = ARIMA(history,order =(1,1,1))
+    model_fit = model.fit()
+    output = model_fit.forecast()
+    yhat = output[0]
+    predictions.append(yhat)
+    obs = test[t]
+    history.append(obs)
+    print('predicted=%f, expected=%f' % (yhat, obs))
+    # evaluate forecasts
+rmse = sqrt(mean_squared_error(test, predictions))
+
+predictions = pd.DataFrame(predictions)
+
+predictions.columns = ['predictions']
+predictions = np.exp(predictions)
+
+"""
+11/19/22 fianlly got predictions to be correct on the test data, now going to generate furute prediciotns 
+"""
+
+dates = pd.date_range(start = "11/21/2022", end = "11/25/2022", freq = "D")
+future_df = pd.DataFrame(index = dates)
+
+predictions_ndx_ts = list()
+lower_bound = list()
+upper_bound = list()
+submission_train = [np.log(x) for x in nasdaq100_data_exp_sm['close']]
+
+for t in range(len(future_df)):
+    model = ARIMA(submission_train ,order =(1,1,1))
+    model_fit = model.fit()
+    output = model_fit.forecast()
+    yhat_s = output[0]
+    lower = model_fit.forecast()[2][0][0]
+    upper = model_fit.forecast()[2][0][1]
+    predictions_ndx_ts.append(yhat_s)
+    lower_bound.append(lower)
+    upper_bound.append(upper)
+    submission_train.append(yhat_s)
+
+
+ndx_submission = pd.DataFrame(submission_train[-5:])
+ndx_submission.columns = ['predictions']
+ndx_submission['lower_bound'] = pd.DataFrame(lower_bound[-5:])
+ndx_submission['upper_bound'] = pd.DataFrame(upper_bound[-5:])
+ndx_submission_final = np.exp(ndx_submission)
+print(ndx_submission_final,rmse)
+
+
+
+
+
+
